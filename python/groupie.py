@@ -1,3 +1,5 @@
+#!/usr/bin/env python
+#
 # Groupie is an LMTP daemon with DKIM validation.
 # It takes group management instructions from emails.
 #
@@ -16,6 +18,17 @@
 # groupie.
 #
 # From: Rick van Rein <rick@openfortress.nl>
+
+
+import sys
+import signal
+
+import asyncore
+
+import lmtpd
+import dkim
+
+from email.utils import getaddresses
 
 
 # For now, all commands are fixed and there is one domain.
@@ -68,4 +81,79 @@
 #	emails, but is otherwise like invite, just
 #	more quietly so.
 
+
+class GroupieService (lmtpd.LMTPServer):
+
+	def process_message (self, peer, mailfrom, rcptto, data):
+		# print 'Connected', peer
+		# print 'MAIL FROM', mailfrom
+		# print 'RCPT TO', rcptto
+		# print 'DATA', len (data), 'bytes'
+		dkobj = dkim.DKIM (data)
+		ok = dkobj.verify ()
+		# print 'OK from DKIM is', ok
+		if not ok:
+			print  '550 Nothing Done: DKIM Validation Failure'
+			return '550 Nothing Done: DKIM Validation Failure'
+		# print dir (dkobj)
+		# print 'HEADERS', dkobj.headers
+		# print 'INCLUDED', dkobj.include_headers
+		for rh in self.required_headers:
+			if not rh in dkobj.include_headers:
+				print 'Missing signature on required header %s' % rh
+				ok = False
+		if not ok:
+			print  '550 Nothing Done: DKIM Signature misses Required Headers'
+			return '550 Nothing Done: DKIM Signature misses Required Headers'
+		#TODO# More sanity checks on the DKIM Signature!!!
+		rhmap = {}
+		for (h,v) in dkobj.headers:
+			h = h.lower ()
+			if h in self.required_headers:
+				if not rhmap.has_key (h):
+					rhmap [h] = []
+				# Parse address headers to [(descr,mailaddr)]
+				if h in ['from', 'to', 'cc', 'reply-to', 'bcc']:
+					v = getaddresses ([v])
+				# Attach (possibly multiple) pairs to previous pairs
+				rhmap [h].extend (v)
+		# Prefix special values with a colon, headers never have that
+		rhmap [':domain'] = dkobj.domain
+		rhmap [':body'] = dkobj.body
+		# print 'Validating domain is:', dkobj.domain
+		print 'Validated data is:', rhmap
+		# print 'From:', dkobj.headers ['From']
+		# print 'To:', dkobj.headers ['To']
+		# print 'Subject:', dkobj.headers ['Subject']
+		# Check the sender domain
+		[(from_nm, from_mail)] = rhmap ['from']
+		if from_mail.split ('@') [1] != dkobj.domain:
+			print  '550 Nothing Done: From Header and Signer Domain mismatch'
+			return '550 Nothing Done: From Header and Signer Domain mismatch'
+		return None
+
+	required_headers = ['from', 'to']
+
+
+def stop_me (signum, stack):
+	sys.exit (0)
+
+
+host = ''
+port = 5024
+if len (sys.argv) >= 2:
+	host = sys.argv [1]
+if len (sys.argv) >= 3:
+	port = int (sys.argv [2])
+if len (sys.argv) >= 4:
+	signum = int (sys.argv [3])
+	signal.signal (signum, stop_me)
+
+groupie = GroupieService ( (host, port) )
+groupie.debug = True
+
+sys.stdout.write ('--\n')
+sys.stdout.flush ()
+
+asyncore.loop ()
 
